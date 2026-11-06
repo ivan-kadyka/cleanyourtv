@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 320x180 banner: a film-strip red field. The launcher draws the app name over plain banners. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <size android:width="320dp" android:height="180dp" />
+    <gradient android:angle="315" android:startColor="#FFB3122E" android:endColor="#FF3A0A1A" />
+</shape>

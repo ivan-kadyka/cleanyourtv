@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!-- Only to fetch the popular-movies list and its posters from kinopoiskapiunofficial.tech. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:banner="@drawable/banner"
+        android:icon="@drawable/icon"
+        android:label="@string/app_name"
+        android:supportsRtl="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <!-- Status screen: whether a key is set, when the list was last fetched, and a Refresh button. -->
+        <activity
+            android:name=".StatusActivity"
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Clean Your TV launcher, trending_app: where Home reads the carousel. -->
+        <meta-data android:name="com.gathin.tvhome.movies" android:value="tv.cleanyour.trending.movies" />
+
+        <!-- Read-only: the list and the posters, which is what Home shows anyway. Holds no key. -->
+        <provider
+            android:name=".MoviesProvider"
+            android:authorities="tv.cleanyour.trending.movies"
+            android:exported="true" />
+
+        <!-- The setup door for the API key and the link template. WRITE_SECURE_SETTINGS is held by the ADB
+             shell only, so no app on the TV can call it. -->
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="tv.cleanyour.trending.config"
+            android:exported="true"
+            android:permission="android.permission.WRITE_SECURE_SETTINGS" />
+    </application>
+</manifest>
