@@ -49,6 +49,8 @@ final class Config {
      * resume when it differs, however the settings were left (see MainActivity#onResume).
      */
     static final String SETTINGS_REVISION_KEY = "settings_revision";
+    /** Launcher settings: a new wallpaper each time Home opens or comes back from an app (on unless turned off). */
+    static final String NEW_EACH_HOME_KEY = "wallpaper_new_each_home";
 
     /** True when Launcher settings changed something since Home was built at revision {@code seen}. */
     static boolean settingsChanged(long seen, long current) {
@@ -680,6 +682,25 @@ final class Config {
             wallpapers.addAll(chosen);
             wallpaper = chosen.isEmpty() ? null : chosen.get(0);
             wallpaperEnabled = !chosen.isEmpty();
+        }
+        // Online wallpapers (Launcher settings): the pictures OnlineWallpapers copied from the add-on, with their place
+        // names, replace the theme's while the setting is on and some have arrived.
+        List<File> online = OnlineWallpapers.enabled(choices) && dir != null
+                ? WallpaperRotation.images(new File(dir, OnlineWallpapers.DIR)) : Collections.emptyList();
+        if (!online.isEmpty()) {
+            wallpapers.clear();
+            wallpapers.addAll(online);
+            wallpaper = online.get(0);
+            wallpaperEnabled = true;
+            wallpaperCaptions = true;
+            if (rotationMinutes <= 0) rotationMinutes = 60;
+            // The photo as it is: no dim, no app-colour glow, no sky, no cinematic artwork over it, full colour.
+            wallpaperDim = 0;
+            ambientGlow = false;
+            appGlow = false;
+            skyIntensity = 0;
+            cinematic = false;
+            wallpaperTrueColor = true;
         }
         // A festive skin comes only from a theme; config.xml has no festival. seasonal_skin names one the same way
         // but launchers before it ignore the key, so a theme can carry it without older ones showing the diya skin.

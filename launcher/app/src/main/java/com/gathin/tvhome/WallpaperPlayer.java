@@ -53,8 +53,15 @@ final class WallpaperPlayer {
     private boolean loading;
     private String displayed = "";
     /** wallpaper_captions: the shown picture's name from wallpapers/captions.txt; null when off or there are none. */
-    private final TextView caption;
-    private final Map<String, String> names;
+    private TextView caption;
+    private final Map<String, String> names = new java.util.HashMap<>();
+    /** Online wallpapers: told each picture shown (the add-on's cache order), and asked for more past the last one. */
+    java.util.function.Consumer<File> onShown;
+    Runnable onEnd;
+    /** Asked quietly for a fresh batch when advance() wraps past the last picture (online wallpapers). */
+    Runnable onMore;
+    /** Launcher settings, on by default: Home opens on the next picture, not the one it showed last. */
+    private final boolean freshOnOpen;
     /** wallpaper_moods: the collection's groups by time of day; empty rotates through all of it. */
     private final Map<String, Set<String>> moods;
     /** config.xml latitude and longitude for the sun's times, and today's {sunrise, sunset} once worked out. */
@@ -72,6 +79,8 @@ final class WallpaperPlayer {
         dimColor = config.wallpaperDim > 0 ? (config.wallpaperDim * 255 / 100) << 24 : 0;
         order = config.wallpaperOrder;
         preferences = context.getSharedPreferences("wallpaper_rotation", Context.MODE_PRIVATE);
+        freshOnOpen = context.getSharedPreferences(Config.SETTINGS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(Config.NEW_EACH_HOME_KEY, true);
         moods = config.wallpaperMoods;
         latitude = moods.isEmpty() ? "" : context.getString(R.string.latitude);
         longitude = moods.isEmpty() ? "" : context.getString(R.string.longitude);
@@ -88,8 +97,9 @@ final class WallpaperPlayer {
         image = new ImageView(context);
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
         image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
-                ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
+        if (config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()) {
+            names.putAll(WallpaperCaptions.read(files.get(0).getParentFile()));
+        }
         caption = names.isEmpty() ? null : makeCaption(context, root);
         if (config.wallpaperEnabled && !files.isEmpty()) {
             root.addView(image, 0, new FrameLayout.LayoutParams(
@@ -107,6 +117,9 @@ final class WallpaperPlayer {
         String previous = preferences.getString("image", "");
         List<File> playable = playable();
         File first = WallpaperRotation.find(playable, previous);
+        if (freshOnOpen && first != null && playable.size() > 1) {
+            first = playable.get((playable.indexOf(first) + 1) % playable.size());
+        }
         if (first == null) first = WallpaperRotation.pick(playable, previous, order, random);
         while (first != null) {
             Bitmap bitmap = decode(first);
@@ -116,6 +129,7 @@ final class WallpaperPlayer {
                 root.setBackground(null);
                 displayed = first.getName();
                 showCaption(false);
+                if (onShown != null) onShown.accept(first);
                 if (!displayed.equals(previous)) {
                     preferences.edit().putString("image", displayed)
                             .putLong("changed", System.currentTimeMillis()).apply();
@@ -159,6 +173,16 @@ final class WallpaperPlayer {
         return WallpaperMood.select(files, moods, WallpaperMood.timeOfDay(now.getHour() * 60 + now.getMinute(), sun[0], sun[1]));
     }
 
+    /** A new set of pictures (online wallpapers changed) without rebuilding Home; the one on screen stays. */
+    void setCollection(List<File> images, Map<String, String> captions) {
+        if (closed) return;
+        files.clear();
+        files.addAll(images);
+        names.clear();
+        names.putAll(captions);
+        if (caption == null && !names.isEmpty()) caption = makeCaption(root.getContext(), root);
+    }
+
     void close() {
         active = false;
         closed = true;
@@ -176,7 +200,49 @@ final class WallpaperPlayer {
             selected = WallpaperRotation.pick(playable, previous, order, random);
         }
         if (selected == null || selected.getName().equals(displayed)) return;
-        File next = selected;
+        showAsync(selected, previous, changed);
+    }
+
+    /**
+     * The previous (-1) or next (+1) picture of the collection, in file-name order and wrapping round: the remote's
+     * Rewind and Fast forward on Home. The rotation's interval starts again from this picture.
+     */
+    boolean step(int direction) {
+        if (closed || loading) return false;
+        List<File> playable = playable();
+        if (playable.isEmpty()) return false;
+        int at = -1;
+        for (int i = 0; i < playable.size(); i++) {
+            if (playable.get(i).getName().equals(displayed)) at = i;
+        }
+        if (direction > 0 && at == playable.size() - 1 && onEnd != null) {
+            onEnd.run();   // past the last picture: a new batch instead of wrapping round
+            return true;
+        }
+        if (playable.size() < 2) return false;
+        int index = at < 0 ? (direction > 0 ? 0 : playable.size() - 1)
+                : Math.floorMod(at + direction, playable.size());
+        showAsync(playable.get(index), displayed, 0);
+        return true;
+    }
+
+    /**
+     * The next picture, wrapping round: Home coming back from an app with "New picture each time" on. Wrapping past the
+     * last one also asks onMore for a fresh batch, which joins the collection when it arrives.
+     */
+    void advance() {
+        if (closed || loading) return;
+        List<File> playable = playable();
+        if (playable.size() < 2) return;
+        int at = -1;
+        for (int i = 0; i < playable.size(); i++) {
+            if (playable.get(i).getName().equals(displayed)) at = i;
+        }
+        if (at == playable.size() - 1 && onMore != null) onMore.run();
+        showAsync(playable.get((at + 1) % playable.size()), displayed, 0);
+    }
+
+    private void showAsync(File next, String previous, long changed) {
         loading = true;
         decoder.execute(() -> {
             Bitmap bitmap = decode(next);
@@ -195,6 +261,7 @@ final class WallpaperPlayer {
                 show(bitmap);
                 displayed = next.getName();
                 showCaption(true);
+                if (onShown != null) onShown.accept(next);
                 if (!displayed.equals(previous) || changed == 0) {
                     preferences.edit().putString("image", displayed)
                             .putLong("changed", System.currentTimeMillis()).apply();

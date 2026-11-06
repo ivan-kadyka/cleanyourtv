@@ -10,23 +10,33 @@ import android.util.AttributeSet;
 import android.view.View;
 
 /**
- * A translucent glass slab: soft sheen fill, bright top specular, crisp rim and a faint outer glow.
- * One instance floats over the grid and is moved with spring animations between tiles.
+ * The focus highlight: a translucent glass slab over the tile, plus a focus ring a few dp outside it. The ring is
+ * a dark separator, a solid bright band and a dark hairline, so it reads on white banners (YouTube, Netflix) as
+ * well as on dark ones and on light wallpapers. One instance floats over the grid and springs between tiles.
  */
 public class GlassView extends View {
 
+    /** The ring's colour (and its glow's) when no app or festival colour is set: violet, which reads on white,
+     *  dark and colourful banners alike. */
+    static final int FOCUS_RGB = 0xA78BFF;
+    /** Room around the tile for the ring and the glow; the view is the zoomed tile plus this on every side. */
+    static final float PAD_DP = 12f;
+    /** Ring layout, outwards from the tile edge: dark gap, bright band, dark hairline; the glow fills the rest. */
+    private static final float GAP_DP = 2.5f, RING_DP = 3f, HAIRLINE_DP = 1f;
+
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint specular = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint dark = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private final float density;
     private float radius;
-    /** Glow colour as 0xRRGGBB: white normally, a festival's accent (diya gold) while a festive skin is on. */
-    private int glowRgb = 0xFFFFFF;
-    /** Glow strength: the white glow stays faint, a coloured one needs more alpha to read as warm light. */
-    private int glowAlpha = 0x30;
-    /** glass_style rim or halo: no sheen and no fill, only the crisp rim (and, for halo, a lighter outer glow). */
+    /** Glow colour as 0xRRGGBB: FOCUS_RGB normally, a festival's accent (diya gold) while a festive skin is on. */
+    private int glowRgb = FOCUS_RGB;
+    /** Glow strength: a coloured glow needs more alpha than a white one did to read as light. */
+    private int glowAlpha = 0x50;
+    /** glass_style rim or halo: no sheen and no fill, only the ring (and, for halo, a lighter outer glow). */
     private boolean flat;
     private boolean halo;
 
@@ -34,29 +44,29 @@ public class GlassView extends View {
         super(context, attrs);
         density = getResources().getDisplayMetrics().density;
         radius = 20f * density;
-        rim.setStyle(Paint.Style.STROKE);
-        rim.setStrokeWidth(1.5f * density);
-        rim.setColor(0xCCFFFFFF);
         glow.setStyle(Paint.Style.STROKE);
+        ring.setStyle(Paint.Style.STROKE);
+        ring.setColor(0xFF000000 | FOCUS_RGB);
+        dark.setStyle(Paint.Style.STROKE);
         // Cache the slab as a texture. The spring only changes translation, so the GPU can
         // move it without replaying clipPath and the glow on every frame. That path is
         // software-rendered on the MT5895 and is what makes the highlight crawl.
         setLayerType(LAYER_TYPE_HARDWARE, null);
     }
 
-    /** Tints the rim and the outer glow; 0 restores the plain white glass. */
+    /** Tints the ring and the outer glow; 0 restores the default FOCUS_RGB ring. */
     void setAccent(int argb) {
         if (argb == 0) {
-            glowRgb = 0xFFFFFF;
-            glowAlpha = 0x30;
-            rim.setColor(0xCCFFFFFF);
+            glowRgb = FOCUS_RGB;
+            glowAlpha = 0x50;
+            ring.setColor(0xFF000000 | FOCUS_RGB);
         } else {
             glowRgb = argb & 0xFFFFFF;
             glowAlpha = 0x70;
-            // The rim is the accent lifted towards white, so the edge still reads as glass, not paint.
+            // The ring is the accent lifted towards white, so it still reads as light, not paint.
             int r = (((glowRgb >> 16) & 0xFF) + 255 * 2) / 3, g = (((glowRgb >> 8) & 0xFF) + 255 * 2) / 3,
                     b = ((glowRgb & 0xFF) + 255 * 2) / 3;
-            rim.setColor(0xE6000000 | (r << 16) | (g << 8) | b);
+            ring.setColor(0xFF000000 | (r << 16) | (g << 8) | b);
         }
         invalidate();
     }
@@ -65,7 +75,6 @@ public class GlassView extends View {
     void setStyle(String style) {
         flat = Config.GLASS_RIM.equals(style) || Config.GLASS_HALO.equals(style);
         halo = Config.GLASS_HALO.equals(style);
-        rim.setStrokeWidth((flat ? 2f : 1.5f) * density);
         invalidate();
     }
 
@@ -83,38 +92,54 @@ public class GlassView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-        float inset = 6f * density;   // room for the glow
+        float inset = PAD_DP * density;   // the tile's edge
         rect.set(inset, inset, getWidth() - inset, getHeight() - inset);
+        float gap = GAP_DP * density, band = RING_DP * density, hair = HAIRLINE_DP * density;
+        float ringOut = gap + band + hair;
 
-        // Outer glow: thin rings across the inset, each a little fainter, so it fades out smoothly. Three wide
-        // strokes left visible bands once the glow took an app's colour at a stronger alpha. The hardware layer
-        // caches the result, so the rings cost one draw, not one per frame of the spring.
+        // Outer glow beyond the ring: thin rings, each a little fainter, so it fades out smoothly. The hardware
+        // layer caches the result, so they cost one draw, not one per frame of the spring.
         if (!flat || halo) {
-            int rings = 12;
-            float step = inset / rings;
+            int rings = 8;
+            float span = inset - ringOut;
+            float step = span / rings;
             int alpha = flat ? glowAlpha / 2 : glowAlpha;
             glow.setStrokeWidth(step + 0.5f);
             for (int i = 0; i < rings; i++) {
-                float o = step * (i + 0.5f);
+                float o = ringOut + step * (i + 0.5f);
                 float t = 1f - (float) i / rings;
                 glow.setColor(Math.round(alpha * t) << 24 | glowRgb);
-                canvas.drawRoundRect(rect.left - o, rect.top - o, rect.right + o, rect.bottom + o, radius + o, radius + o, glow);
+                stroke(canvas, o, glow);
             }
         }
-        if (flat) {
-            canvas.drawRoundRect(rect, radius, radius, rim);
-            return;
+
+        if (!flat) {
+            canvas.drawRoundRect(rect, radius, radius, fill);
+            // Sheen across the top 45%: clipRect stays on the GPU (clipPath did not on the MT5895) and
+            // the round rect under it keeps the top corners rounded with a flat bottom edge.
+            canvas.save();
+            canvas.clipRect(rect.left, rect.top, rect.right, rect.top + rect.height() * 0.45f);
+            canvas.drawRoundRect(rect, radius, radius, specular);
+            canvas.restore();
         }
 
-        canvas.drawRoundRect(rect, radius, radius, fill);
+        // Dark separator from the tile edge to the band (overlapping the edge by a hair so no light seam shows):
+        // keeps a white banner and the white band apart.
+        dark.setColor(0x99000000);
+        dark.setStrokeWidth(gap + 1f);
+        stroke(canvas, (gap - 1f) / 2f, dark);
+        // The bright band itself.
+        ring.setStrokeWidth(band);
+        stroke(canvas, gap + band / 2f, ring);
+        // Dark hairline outside it, so the band also reads on a light wallpaper.
+        dark.setColor(0x66000000);
+        dark.setStrokeWidth(hair);
+        stroke(canvas, gap + band + hair / 2f, dark);
+    }
 
-        // Sheen across the top 45%: clipRect stays on the GPU (clipPath did not on the MT5895) and
-        // the round rect under it keeps the top corners rounded with a flat bottom edge.
-        canvas.save();
-        canvas.clipRect(rect.left, rect.top, rect.right, rect.top + rect.height() * 0.45f);
-        canvas.drawRoundRect(rect, radius, radius, specular);
-        canvas.restore();
-
-        canvas.drawRoundRect(rect, radius, radius, rim);
+    /** A rounded stroke centred {@code out} px outside the tile's edge, its corners concentric with the tile's. */
+    private void stroke(Canvas canvas, float out, Paint paint) {
+        float r = radius + out;
+        canvas.drawRoundRect(rect.left - out, rect.top - out, rect.right + out, rect.bottom + out, r, r, paint);
     }
 }

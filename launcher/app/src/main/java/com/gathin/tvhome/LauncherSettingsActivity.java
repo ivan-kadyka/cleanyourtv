@@ -35,6 +35,9 @@ public final class LauncherSettingsActivity extends Activity {
     private static final String[] CLOCK_FORMATS = {"system", "12", "24"};
     private final TextView[] clockChoices = new TextView[CLOCK_FORMATS.length];
     private TextView wallpaperChoice;
+    private TextView themeChoice;
+    private TextView onlineChoice;
+    private TextView freshChoice;
     private TextView animationsChoice;
     private TextView advancedChoice;
     private TextView followThemeChoice;
@@ -125,6 +128,26 @@ public final class LauncherSettingsActivity extends Activity {
         }
         wallpaperChoice = findViewById(R.id.wallpaperChoice);
         wallpaperChoice.setOnClickListener(v -> showWallpaperPicker());
+        themeChoice = findViewById(R.id.themeChoice);
+        themeChoice.setOnClickListener(v -> showThemePicker());
+        freshChoice = findViewById(R.id.freshChoice);
+        freshChoice.setOnClickListener(v -> {
+            choices.edit().putBoolean(Config.NEW_EACH_HOME_KEY, !choices.getBoolean(Config.NEW_EACH_HOME_KEY, true)).apply();
+            changed();
+            refresh();
+        });
+        onlineChoice = findViewById(R.id.onlineChoice);
+        onlineChoice.setOnClickListener(v -> {
+            boolean on = !OnlineWallpapers.enabled(choices);
+            if (on && OnlineWallpapers.uri(this) == null) {
+                Toast.makeText(this, R.string.online_wallpapers_missing, Toast.LENGTH_LONG).show();
+                return;
+            }
+            choices.edit().putBoolean(OnlineWallpapers.KEY, on).apply();
+            changed();
+            if (on) Toast.makeText(this, R.string.online_wallpapers_hint, Toast.LENGTH_LONG).show();
+            refresh();
+        });
         animationsChoice = findViewById(R.id.animationsChoice);
         animationsChoice.setOnClickListener(v -> {
             animations = !animations;
@@ -185,6 +208,47 @@ public final class LauncherSettingsActivity extends Activity {
         for (int i = views.length - 1; i >= 0; i--) row.addView(views[i]);
     }
 
+    /** The themes kept on the TV (ThemeLibrary), then the built-in look. Applying one closes settings so Home reloads. */
+    private void showThemePicker() {
+        File dir = Config.dir(this);
+        List<String> names = ThemeLibrary.list(dir);
+        String current = ThemeLibrary.current(dir);
+        List<String> labels = new ArrayList<>();
+        List<File> previews = new ArrayList<>();
+        for (String name : names) {
+            labels.add(ThemeLibrary.label(name));
+            previews.add(ThemeLibrary.preview(dir, name));
+        }
+        labels.add(getString(R.string.theme_builtin));
+        previews.add(null);
+        int checked = "".equals(current) ? names.size() : names.indexOf(current);
+        PreviewPicker.show(this, getString(R.string.theme_label), labels, previews, checked, which -> {
+            String name = which == names.size() ? "" : names.get(which);
+            themeChoice.setEnabled(false);
+            new Thread(() -> {
+                boolean ok;
+                try {
+                    ThemeLibrary.apply(dir, name);
+                    ok = true;
+                } catch (java.io.IOException e) {
+                    ok = false;
+                }
+                boolean applied = ok;
+                runOnUiThread(() -> {
+                    themeChoice.setEnabled(true);
+                    if (!applied) {
+                        Toast.makeText(this, R.string.theme_failed, Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    changed();
+                    Toast.makeText(this, R.string.theme_applied, Toast.LENGTH_SHORT).show();
+                    finish();
+                });
+            }, "theme-apply").start();
+        });
+    }
+
+    /** The theme's pictures with a preview of each, then "Theme default" (its own rotation or picture) and "None". */
     private void showWallpaperPicker() {
         File dir = Config.dir(this);
         List<File> images = new java.util.ArrayList<>(WallpaperRotation.images(
@@ -192,33 +256,36 @@ public final class LauncherSettingsActivity extends Activity {
         // A theme with a single wallpaper.jpg offers that picture too (Config maps the choice back to it).
         File single = dir == null ? null : new File(dir, Config.WALLPAPER_NAME);
         if (single != null && single.isFile()) images.add(0, single);
-        String[] labels = new String[images.size() + 1];
-        for (int i = 0; i < images.size(); i++) labels[i] = images.get(i).getName();
-        labels[images.size()] = getString(R.string.wallpaper_none);
+        List<String> labels = new ArrayList<>();
+        List<File> previews = new ArrayList<>(images);
+        // A theme's captions.txt names its pictures better than their file names ("001.jpg").
+        java.util.Map<String, String> captions = WallpaperCaptions.read(dir == null ? null : new File(dir, "wallpapers"));
+        for (File f : images) {
+            String caption = captions.get(f.getName());
+            labels.add(caption != null && !caption.isEmpty() ? caption : pictureName(f.getName()));
+        }
+        int defaultRow = images.size(), noneRow = images.size() + 1;
+        labels.add(getString(R.string.wallpaper_theme_default));
+        previews.add(images.isEmpty() ? null : images.get(0));
+        labels.add(getString(R.string.wallpaper_none));
+        previews.add(null);
         String current = choices.getString(Config.WALLPAPER_CHOICE_KEY, null);
-        int checked = "none".equals(current) ? images.size()
-                : indexOf(images, current);
-        new AlertDialog.Builder(this)
-                .setTitle(R.string.wallpaper_label)
-                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
-                    dialog.dismiss();
-                    if (which == images.size()) {
-                        choices.edit().putString(Config.WALLPAPER_CHOICE_KEY, "none").apply();
-                    } else {
-                        choices.edit().putString(Config.WALLPAPER_CHOICE_KEY,
-                                images.get(which).getName()).apply();
-                    }
-                    changed();
-                    Toast.makeText(this, R.string.wallpaper_applied, Toast.LENGTH_SHORT).show();
-                    refresh();
-                })
-                .setNeutralButton(R.string.wallpaper_theme_default, (dialog, which) -> {
-                    choices.edit().remove(Config.WALLPAPER_CHOICE_KEY).apply();
-                    changed();
-                    refresh();
-                })
-                .setNegativeButton(android.R.string.cancel, null)
-                .show();
+        int checked = current == null ? defaultRow : "none".equals(current) ? noneRow : indexOf(images, current);
+        PreviewPicker.show(this, getString(R.string.wallpaper_label), labels, previews, checked, which -> {
+            if (which == defaultRow) choices.edit().remove(Config.WALLPAPER_CHOICE_KEY).apply();
+            else if (which == noneRow) choices.edit().putString(Config.WALLPAPER_CHOICE_KEY, "none").apply();
+            else choices.edit().putString(Config.WALLPAPER_CHOICE_KEY, images.get(which).getName()).apply();
+            changed();
+            Toast.makeText(this, R.string.wallpaper_applied, Toast.LENGTH_SHORT).show();
+            refresh();
+        });
+    }
+
+    /** "07-City-lights.jpg" reads "City lights". */
+    static String pictureName(String file) {
+        String s = file.replaceFirst("\\.[A-Za-z]+$", "").replaceFirst("^\\d+[-_ ]+", "").replace('-', ' ').replace('_', ' ');
+        if (s.isEmpty()) return file;
+        return s.substring(0, 1).toUpperCase(java.util.Locale.ROOT) + s.substring(1).toLowerCase(java.util.Locale.ROOT);
     }
 
     /** Off, then every app with a TV entry point by name. Saved at once; it is read on the next boot. */
@@ -313,6 +380,13 @@ public final class LauncherSettingsActivity extends Activity {
                 getString(advancedEffects ? R.string.on : R.string.off)));
         advancedChoice.setEnabled(animations);
         advancedChoice.setAlpha(animations ? 1f : 0.5f);
+        freshChoice.setText(getString(R.string.new_each_home_state,
+                getString(choices.getBoolean(Config.NEW_EACH_HOME_KEY, true) ? R.string.on : R.string.off)));
+        onlineChoice.setText(getString(R.string.online_wallpapers_state,
+                getString(OnlineWallpapers.enabled(choices) ? R.string.on : R.string.off)));
+        String theme = ThemeLibrary.current(Config.dir(this));
+        themeChoice.setText(getString(R.string.theme_state, theme == null ? getString(R.string.theme_pushed)
+                : theme.isEmpty() ? getString(R.string.theme_builtin) : ThemeLibrary.label(theme)));
         String wallpaperCurrent = choices.getString(Config.WALLPAPER_CHOICE_KEY, null);
         wallpaperChoice.setText(getString(R.string.wallpaper_state,
                 "none".equals(wallpaperCurrent) ? getString(R.string.wallpaper_none)

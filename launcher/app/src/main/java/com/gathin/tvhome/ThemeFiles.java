@@ -20,6 +20,14 @@ final class ThemeFiles {
             return Config.FILE_NAME.equals(name) || "wallpaper.jpg".equals(name) || "theme_revision".equals(name)
                     ? name : null;
         }
+        // The theme library Launcher settings offers (ThemeLibrary): library/<name>/config.json, .../wallpaper.jpg
+        // and .../wallpapers/<image or captions.txt>.
+        if (segments.size() >= 3 && ThemeLibrary.DIR.equals(segments.get(0)) && ThemeLibrary.validName(segments.get(1))) {
+            String prefix = ThemeLibrary.DIR + "/" + segments.get(1) + "/";
+            if (segments.size() == 3 && "screenshot.jpg".equals(segments.get(2))) return prefix + "screenshot.jpg";
+            String rest = path(segments.subList(2, segments.size()));
+            return rest == null || "theme_revision".equals(rest) || rest.startsWith(ThemeLibrary.DIR + "/") ? null : prefix + rest;
+        }
         if (segments.size() == 2 && WALLPAPERS.equals(segments.get(0))
                 && (collectionImage(segments.get(1)) || WallpaperCaptions.FILE_NAME.equals(segments.get(1)))) {
             return WALLPAPERS + "/" + segments.get(1);

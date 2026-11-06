@@ -75,6 +75,7 @@ import androidx.dynamicanimation.animation.FloatPropertyCompat;
 import androidx.dynamicanimation.animation.SpringAnimation;
 import androidx.dynamicanimation.animation.SpringForce;
 import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
@@ -197,6 +198,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private TextView raceKicker, raceHeadline, raceSessions;
     /** game_day: each team's next game from an add-on, rotating in the race panel; null when the key is off. */
     private GameDay gameDay;
+    // trending_app: the poster row between the top bar and the dock (Trending).
+    private Trending trending;
+    private View trendingPanel;
+    private TextView trendingTitle, trendingMeta;
+    private RecyclerView trendingRow;
+    private final TrendingAdapter trendingAdapter = new TrendingAdapter();
+    /** The poster focus comes back to, from the dock or the top bar. */
+    private int trendingIndex;
+    private int posterW, posterH;
     private View raceBar;
     private LinearLayout racePager;
     private long rotationStart;
@@ -482,6 +492,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // the theme's background, so launch looks the same.
         getWindow().setBackgroundDrawable(null);
         wallpaperPlayer = new WallpaperPlayer(this, root, cfg);
+        setUpOnline();
         sky = findViewById(R.id.sky);
         sky.setIntensity(cfg.skyIntensity);
         glass = findViewById(R.id.glass);
@@ -777,6 +788,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
 
         btnInputs = findViewById(R.id.btnInputs);
+        setUpTrending();   // needs the grid and the top bar
         View btnSettings = findViewById(R.id.btnSettings);
         btnInputs.setOnClickListener(v -> showInputs());
         btnWifi.setOnClickListener(v -> openNetworkPill());
@@ -861,8 +873,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
             if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                // Back to the dock tile Up came from, not wherever the focus finder lands.
-                focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
+                // The poster row when it is shown; else back to the dock tile Up came from, not wherever the
+                // focus finder lands.
+                if (!focusTrending()) focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
                 return true;
             }
             int firstButton = btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
@@ -888,6 +901,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         }
         if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
+        // pills_expand_on_focus: Inputs, the network pill and Settings as icons that slide their label out on focus.
+        if (getResources().getBoolean(R.bool.pills_expand_on_focus) && !topMenu) {
+            pillExpander = new PillExpander(density, animations && !reducedMotion);
+            if (!cfg.iconOnlyInputs) pillExpander.attach((TextView) btnInputs);
+            if (!iconOnlyButtons) {
+                pillExpander.attach(btnWifi);
+                pillExpander.attach((TextView) btnSettings);
+            }
+        }
 
         // Hide the glass when focus leaves the tiles.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
@@ -991,6 +1013,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (openInputsIfAsked(intent)) return;
         if (intent == null || !intent.hasCategory(Intent.CATEGORY_HOME)) return;
         if (gameDay != null && !stopped) gameDay.read();
+        if (trending != null && !stopped) trending.read();
+        trendingIndex = 0;
         grid.scrollToPosition(0);
         lastFocused = 0;
         lastFocusedKey = adapter.getItemCount() > 0 ? adapter.keyAt(0) : null;
@@ -1065,8 +1089,25 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         if (showStats) startStats();
         if (gameDay != null) gameDay.start();
+        if (trending != null) trending.start();
+        if (onlineUri != null) {
+            try {
+                getContentResolver().registerContentObserver(onlineUri, false, onlineObserver);
+            } catch (SecurityException gone) {
+                // the add-on went away; the pictures already copied stay
+            }
+            syncOnline();
+        }
         sky.update();
         wallpaperPlayer.start();
+        // Back from an app (or the screen): a new picture, with "New picture each time Home opens" on. Not after a
+        // pop-up or a dialog, which only pause Home; the first start already opened on the next one (showFirst).
+        if (cameBack) {
+            cameBack = false;
+            if (getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE).getBoolean(Config.NEW_EACH_HOME_KEY, true)) {
+                wallpaperPlayer.advance();
+            }
+        }
         handler.postDelayed(minuteTick, MINUTE_MS);
         if (festive && lamp != null) {
             lamp.start();
@@ -1250,6 +1291,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         startPending = null;   // leaving Home before the network came back: the boot's app stays closed
         stopStats();
         if (gameDay != null) gameDay.stop();
+        if (trending != null) trending.stop();
+        if (onlineUri != null) getContentResolver().unregisterContentObserver(onlineObserver);
         handler.removeCallbacks(turnTick);
         if (lamp != null) lamp.stop();
         cancelPendingFocusScroll();
@@ -1266,6 +1309,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         unregisterReceiver(timeReceiver);
         handler.removeCallbacks(clockCheck);
         stopped = true;
+        cameBack = true;
         tileRefresh.onStop();
     }
 
@@ -1309,6 +1353,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         RemoteKeys.release(this);
         cancelHoldOk();
         if (gameDay != null) gameDay.shutdown();
+        if (trending != null) trending.shutdown();
         unregisterReceiver(packageReceiver);
         wallpaperPlayer.close();
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
@@ -1358,6 +1403,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (resumed && event.getKeyCode() >= 1000 && RemoteKeys.handle(this, event, homeAppKeys.get(event.getKeyCode()),
                 homeHoldAppKeys.get(event.getKeyCode()))) return true;
         if (handleSettingsKey(event)) return true;
+        if (wallpaperKey(event)) return true;
         if (holdOk(event)) return true;
         if (tileMenuEnabled && !reordering && openPopup == null && cardPrompt == null
                 && event.getKeyCode() == KeyEvent.KEYCODE_MENU) {
@@ -1738,7 +1784,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         Rect r = tileRect;
         r.set(0, 0, card.getWidth(), card.getHeight());
         root.offsetDescendantRectToMyCoords(card, r);
-        float pad = 6f * density;        // matches GlassView's glow inset
+        float pad = GlassView.PAD_DP * density;   // GlassView's room for the ring and glow
         float scale = adapter.focusScale();
         float w = card.getWidth() * scale + 2 * pad;
         float h = card.getHeight() * scale + 2 * pad;
@@ -1814,7 +1860,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(pos);
         View card = vh == null ? null : vh.itemView.findViewById(R.id.card);
         if (card == null || card.getWidth() <= 0 || !card.isFocused()) return;
-        float pad = 6f * density;
+        float pad = GlassView.PAD_DP * density;
         float scale = adapter.focusScale();
         int w = (int) (card.getWidth() * scale + 2 * pad);
         int h = (int) (card.getHeight() * scale + 2 * pad);
@@ -2342,6 +2388,241 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 : res.getString(R.string.storage_gb_decimal, gb);
     }
 
+    // ---- trending row ----------------------------------------------------------------------------
+
+    private void setUpTrending() {
+        trendingPanel = findViewById(R.id.trendingPanel);
+        trendingTitle = findViewById(R.id.trendingTitle);
+        trendingMeta = findViewById(R.id.trendingMeta);
+        trendingRow = findViewById(R.id.trendingRow);
+        // A dock and a grid below it are what the row sits between; single_row and the plain grid have neither.
+        if (!dockRow || singleRow) return;
+        trending = Trending.create(this, getString(R.string.trending_app), handler, this::onTrendingChanged);
+        if (trending == null) return;
+        trendingRow.setLayoutManager(new LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false));
+        trendingRow.setItemAnimator(null);
+        trendingRow.setAdapter(trendingAdapter);
+        // The big app name would sit in the row's place.
+        hero.setVisibility(View.GONE);
+        View clockBlock = findViewById(R.id.leftBlock);
+        grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                // Rides up with the dock, and is gone by the time it reaches the clock, as the game_day panel.
+                int shift = rv.canScrollVertically(-1) ? rv.computeVerticalScrollOffset() : 0;
+                trendingPanel.setTranslationY(-shift);
+                int room = Math.max(1, (int) trendingPanel.getY() + shift - clockBlock.getBottom());
+                float alpha = Math.max(0f, 1f - shift / (float) room);
+                trendingPanel.setAlpha(alpha);
+                // Faded out, it must not take focus or keys meant for the grid.
+                trendingRow.setDescendantFocusability(alpha < 0.5f
+                        ? ViewGroup.FOCUS_BLOCK_DESCENDANTS : ViewGroup.FOCUS_AFTER_DESCENDANTS);
+            }
+        });
+        grid.addOnLayoutChangeListener((v, l, top, r, b, ol, ot, or, ob) -> layoutTrending());
+    }
+
+    private void onTrendingChanged() {
+        List<Trending.Movie> movies = trending.movies();
+        boolean had = trendingPanel.getVisibility() == View.VISIBLE;
+        boolean focused = trendingRow.hasFocus();
+        trendingAdapter.notifyDataSetChanged();
+        trendingPanel.setVisibility(movies.isEmpty() ? View.GONE : View.VISIBLE);
+        trendingIndex = Math.min(trendingIndex, Math.max(0, movies.size() - 1));
+        if (movies.isEmpty()) {
+            if (focused) focusTile(lastFocused % COLUMNS);
+            return;
+        }
+        showMovie(trendingIndex);
+        if (!had) grid.post(this::layoutTrending);
+        if (focused) trendingRow.post(this::focusTrending);
+    }
+
+    /**
+     * Sizes the posters to the room between the clock and the dock, and puts the panel's bottom just above the
+     * dock band. Measured with the grid at rest; scrolling moves the panel by translation only.
+     */
+    private void layoutTrending() {
+        if (trending == null || trendingPanel.getVisibility() != View.VISIBLE || grid.getHeight() == 0) return;
+        View clockBlock = findViewById(R.id.leftBlock);
+        int[] at = new int[2];
+        int[] rootAt = new int[2];
+        root.getLocationInWindow(rootAt);
+        grid.getLocationInWindow(at);
+        // At rest the dock is parked on the grid's top padding line (onTileFocused); its band starts a little above.
+        int dockTop = at[1] - rootAt[1] + grid.getPaddingTop() - Math.round(10 * density);
+        clockBlock.getLocationInWindow(at);
+        int top = at[1] - rootAt[1] + clockBlock.getHeight() + Math.round(14 * density);
+        trendingTitle.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        trendingMeta.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        int text = trendingTitle.getMeasuredHeight() + trendingMeta.getMeasuredHeight() + Math.round(16 * density);
+        int pad = trendingRow.getPaddingTop() + trendingRow.getPaddingBottom();
+        int h = Math.min(Math.round(200 * density), dockTop - top - text - pad);
+        if (h < Math.round(72 * density)) {
+            // No room on this screen: leave the row off rather than squash it under the clock.
+            trendingPanel.setVisibility(View.GONE);
+            return;
+        }
+        if (h != posterH) {
+            posterH = h;
+            posterW = Math.round(h * 2 / 3f);
+            ViewGroup.LayoutParams rowLp = trendingRow.getLayoutParams();
+            rowLp.height = pad + posterH;
+            trendingRow.setLayoutParams(rowLp);
+            trendingAdapter.notifyDataSetChanged();
+        }
+        // The resting place is a margin; translationY is left to the scroll listener, which moves it with the dock.
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) trendingPanel.getLayoutParams();
+        int want = dockTop - (text + pad + posterH);
+        if (lp.topMargin != want) {
+            lp.topMargin = want;
+            trendingPanel.setLayoutParams(lp);
+        }
+    }
+
+    /** Focuses the remembered poster; false when the row is not shown, so the caller goes on as before. */
+    private boolean focusTrending() {
+        if (trending == null || trendingPanel.getVisibility() != View.VISIBLE || trendingAdapter.getItemCount() == 0
+                || trendingPanel.getAlpha() < 0.5f) return false;
+        int index = Math.max(0, Math.min(trendingIndex, trendingAdapter.getItemCount() - 1));
+        RecyclerView.ViewHolder vh = trendingRow.findViewHolderForAdapterPosition(index);
+        if (vh != null) {
+            vh.itemView.requestFocus();
+        } else {
+            trendingRow.scrollToPosition(index);
+            trendingRow.post(() -> {
+                RecyclerView.ViewHolder later = trendingRow.findViewHolderForAdapterPosition(index);
+                if (later != null) later.itemView.requestFocus();
+            });
+        }
+        return true;
+    }
+
+    /** The film's name, and "IMDb 7.4 · 2026 · Drama, Thriller · USA" under it. */
+    private void showMovie(int index) {
+        List<Trending.Movie> movies = trending.movies();
+        if (index < 0 || index >= movies.size()) return;
+        Trending.Movie m = movies.get(index);
+        trendingTitle.setText(m.title);
+        List<String> parts = new ArrayList<>();
+        if (m.imdb > 0) parts.add(getString(R.string.trending_imdb, String.format(Locale.US, "%.1f", m.imdb)));
+        else if (m.kp > 0) parts.add(getString(R.string.trending_kp, String.format(Locale.US, "%.1f", m.kp)));
+        if (m.year > 0) parts.add(String.valueOf(m.year));
+        if (!m.genres.isEmpty()) parts.add(m.genres);
+        if (!m.country.isEmpty()) parts.add(m.country);
+        if (m.sample) parts.add(getString(R.string.trending_sample));
+        trendingMeta.setText(TextUtils.join("  ·  ", parts));
+    }
+
+    /** OK on a poster: the add-on's link (HD AlfaBox's film page), else the app the add-on names. */
+    private void openMovie(Trending.Movie m) {
+        if (!m.link.isEmpty()) {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(m.link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                return;
+            } catch (ActivityNotFoundException | SecurityException e) {
+                // Falls through to the app itself.
+            }
+        }
+        PackageManager pm = getPackageManager();
+        Intent app = m.fallback.isEmpty() ? null : pm.getLeanbackLaunchIntentForPackage(m.fallback);
+        if (app == null && !m.fallback.isEmpty()) app = pm.getLaunchIntentForPackage(m.fallback);
+        if (app != null) startActivity(app.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        else Toast.makeText(this, getString(R.string.trending_open_failed, m.title), Toast.LENGTH_SHORT).show();
+    }
+
+    private final class TrendingAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+        @Override
+        public int getItemCount() {
+            return trending == null || posterH == 0 ? 0 : trending.movies().size();
+        }
+
+        @NonNull
+        @Override
+        public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            float r = 10 * density;
+            FrameLayout card = new FrameLayout(MainActivity.this);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(0xFF1E1E22);
+            bg.setCornerRadius(r);
+            card.setBackground(bg);
+            card.setClipToOutline(true);
+            card.setFocusable(true);
+            GradientDrawable rim = new GradientDrawable();
+            rim.setCornerRadius(r);
+            rim.setStroke(Math.round(3 * density), 0xFFFFFFFF);
+            rim.setColor(0);
+
+            TextView name = new TextView(MainActivity.this);
+            name.setTextColor(0xCCFFFFFF);
+            name.setTextSize(13);
+            name.setGravity(Gravity.CENTER);
+            int p = Math.round(8 * density);
+            name.setPadding(p, p, p, p);
+            card.addView(name, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            ImageView image = new ImageView(MainActivity.this);
+            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            card.addView(image, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            RecyclerView.ViewHolder vh = new RecyclerView.ViewHolder(card) { };
+            card.setOnFocusChangeListener((v, focused) -> {
+                card.setForeground(focused ? rim : null);
+                float s = focused ? 1.06f : 1f;
+                if (animations && !reducedMotion) card.animate().scaleX(s).scaleY(s).setDuration(140).start();
+                else {
+                    card.setScaleX(s);
+                    card.setScaleY(s);
+                }
+                int pos = vh.getBindingAdapterPosition();
+                if (focused && pos != RecyclerView.NO_POSITION) {
+                    trendingIndex = pos;
+                    showMovie(pos);
+                }
+            });
+            card.setOnClickListener(v -> {
+                int pos = vh.getBindingAdapterPosition();
+                List<Trending.Movie> movies = trending.movies();
+                if (pos >= 0 && pos < movies.size()) openMovie(movies.get(pos));
+            });
+            card.setOnKeyListener((v, keyCode, event) -> {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                int pos = vh.getBindingAdapterPosition();
+                switch (keyCode) {
+                    case KeyEvent.KEYCODE_DPAD_UP:
+                        (btnInputs.getVisibility() == View.VISIBLE ? btnInputs : firstTopButton()).requestFocus();
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_DOWN:
+                        focusTile(lastFocused % COLUMNS);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_LEFT:
+                        return pos <= 0;
+                    case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        return pos >= getItemCount() - 1;
+                    default:
+                        return false;
+                }
+            });
+            return vh;
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull RecyclerView.ViewHolder vh, int position) {
+            Trending.Movie m = trending.movies().get(position);
+            FrameLayout card = (FrameLayout) vh.itemView;
+            RecyclerView.LayoutParams lp = new RecyclerView.LayoutParams(posterW, posterH);
+            lp.setMarginEnd(Math.round(14 * density));
+            card.setLayoutParams(lp);
+            card.setContentDescription(m.title);
+            ((TextView) card.getChildAt(0)).setText(m.title);
+            ImageView image = (ImageView) card.getChildAt(1);
+            Bitmap b = trending.poster(m.poster, () -> {
+                int at = vh.getBindingAdapterPosition();
+                if (at != RecyclerView.NO_POSITION) notifyItemChanged(at);
+            });
+            image.setImageBitmap(b);
+        }
+    }
+
     // ---- navigation ------------------------------------------------------------------------------
 
     @Override
@@ -2375,7 +2656,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     rtlAppGrid, keyCode == KeyEvent.KEYCODE_DPAD_LEFT);
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
+            if (position < COLUMNS) {
+                // dock row: the poster row when it is shown, else let focus move to the top bar
+                if (!focusTrending()) return false;
+                grid.playSoundEffect(SoundEffectConstants.NAVIGATION_UP);
+                return true;
+            }
             target = position - COLUMNS;
         } else {
             int lastRowStart = ((count - 1) / COLUMNS) * COLUMNS;
@@ -2878,6 +3164,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             btnWifi.setContentDescription(btnWifi.getText());
             btnWifi.setText(null);
         }
+        if (pillExpander != null) pillExpander.textChanged(btnWifi);
         if (festive && lamp != null) {
             if (online && flame == 0) flame = 3;   // online some other way (cellular, USB tethering)
             lamp.setSteady(steady);
@@ -2905,6 +3192,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean launcherSettingsButton;
     /** icon_only_buttons without wifi_label_width: the Wi-Fi pill shows no network name. */
     private boolean wifiIconOnly;
+    private PillExpander pillExpander;
     /** config.xml wifi_status_color: the Wi-Fi icon's green while online and its usual pill colours; null while off. */
     private ColorStateList wifiOnlineTint, wifiPlainTint;
     /** wifi_status_warnings (with wifi_status_color): orange without internet, red offline; null while off. */
@@ -3535,7 +3823,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // Inputs opens its own list once this one has closed.
         if (showInputsMenuRow) addInputRow(rows, popup, R.drawable.ic_input, getString(R.string.inputs), -1, () -> root.post(this::showInputs));
         addInputRow(rows, popup, R.drawable.ic_wifi, getString(R.string.quick_network), -1, this::openNetworkPill);
-        CharSequence network = wifiIconOnly ? btnWifi.getContentDescription() : btnWifi.getText();
+        CharSequence network = wifiIconOnly || pillExpander != null ? btnWifi.getContentDescription() : btnWifi.getText();
         if (!TextUtils.isEmpty(network)) {
             TextView status = rows.getChildAt(rows.getChildCount() - 1).findViewById(R.id.status);
             status.setText(network);
@@ -3613,6 +3901,84 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private static boolean isOkKey(int code) {
         return code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
                 || code == KeyEvent.KEYCODE_NUMPAD_ENTER || code == KeyEvent.KEYCODE_BUTTON_A;
+    }
+
+    /** Rewind / Fast forward (and Previous / Next) on Home: the previous or next wallpaper of the collection. */
+    private boolean wallpaperKey(KeyEvent event) {
+        int code = event.getKeyCode();
+        boolean back = code == KeyEvent.KEYCODE_MEDIA_REWIND || code == KeyEvent.KEYCODE_MEDIA_PREVIOUS;
+        boolean forward = code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || code == KeyEvent.KEYCODE_MEDIA_NEXT;
+        if (!back && !forward || reordering || openPopup != null) return false;
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) wallpaperPlayer.step(forward ? 1 : -1);
+        return true;
+    }
+
+    // ---- online wallpapers -------------------------------------------------------------------------
+
+    private Uri onlineUri;
+    private boolean onlineSyncing;
+    private final android.database.ContentObserver onlineObserver = new android.database.ContentObserver(new Handler(android.os.Looper.getMainLooper())) {
+        @Override
+        public void onChange(boolean selfChange) {
+            syncOnline();
+        }
+    };
+
+    /** Home was built with online pictures (not the theme's while the first ones were still on their way). */
+    private boolean onlineActive;
+    /** ⏩ ran past the last picture: show the first of the new batch once it is copied. */
+    private boolean onlineNext;
+    /** Home was stopped (an app or the screensaver covered it), so the next onResume is a return to Home. */
+    private boolean cameBack;
+
+    private void setUpOnline() {
+        if (!OnlineWallpapers.enabled(getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE))) return;
+        onlineUri = OnlineWallpapers.uri(this);
+        File dir = Config.dir(this);
+        onlineActive = onlineUri != null && dir != null
+                && !WallpaperRotation.images(new File(dir, OnlineWallpapers.DIR)).isEmpty();
+        if (!onlineActive) return;
+        Context app = getApplicationContext();
+        Uri uri = onlineUri;
+        wallpaperPlayer.onShown = picture -> new Thread(() -> OnlineWallpapers.used(app, uri, picture), "online-used").start();
+        wallpaperPlayer.onEnd = () -> {
+            if (onlineNext) return;
+            onlineNext = true;
+            Toast.makeText(this, R.string.online_wallpapers_more, Toast.LENGTH_SHORT).show();
+            new Thread(() -> OnlineWallpapers.more(app, uri), "online-more").start();
+        };
+        wallpaperPlayer.onMore = () -> new Thread(() -> OnlineWallpapers.more(app, uri), "online-more").start();
+    }
+
+    /**
+     * Copies new pictures from the add-on off the main thread. The first ones rebuild Home (it was built with the
+     * theme's); later ones replace the player's collection in place, and after ⏩ past the end the first new one shows.
+     */
+    private void syncOnline() {
+        if (onlineUri == null || onlineSyncing) return;
+        onlineSyncing = true;
+        Uri uri = onlineUri;
+        new Thread(() -> {
+            boolean changed = OnlineWallpapers.sync(getApplicationContext(), uri);
+            runOnUiThread(() -> {
+                onlineSyncing = false;
+                if (isFinishing() || isDestroyed()) return;
+                if (!onlineActive) {
+                    if (changed && !stopped) recreate();
+                    return;
+                }
+                if (changed) {
+                    File online = new File(Config.dir(this), OnlineWallpapers.DIR);
+                    wallpaperPlayer.setCollection(WallpaperRotation.images(online), WallpaperCaptions.read(online));
+                }
+                if (onlineNext) {
+                    onlineNext = false;
+                    if (!changed || !wallpaperPlayer.step(1)) {
+                        Toast.makeText(this, R.string.online_wallpapers_none, Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+        }, "online-wallpapers").start();
     }
 
     /** True when the event belongs to a hold that opened the tile menu and must not reach the tile. */

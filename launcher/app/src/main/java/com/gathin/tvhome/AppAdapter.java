@@ -333,6 +333,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     new ComponentName(ctx, HomeSettingsActivity.class), null,
                     ctx.getDrawable(R.drawable.ic_home_settings), null, 0));
         }
+        // launcher_settings_tile: a Launcher settings tile at the end of the grid, for the remote alone.
+        if (ctx.getResources().getBoolean(R.bool.launcher_settings_tile)) {
+            fresh.add(new Entry(Entry.HOME_SETTINGS, ctx.getString(R.string.launcher_settings),
+                    new ComponentName(ctx, LauncherSettingsActivity.class), null,
+                    ctx.getDrawable(R.drawable.ic_settings), null, 0));
+        }
         docked = 0;
         while (docked < fresh.size() && isDocked(fresh.get(docked))) docked++;
         emptySlots = dockRow && !reordering ? DockSlots.empty(docked, dockSize, fresh.size(), fillDock) : 0;
@@ -527,8 +533,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     /** Opens the tile's activity by explicit component, with no extras: a card can name nothing else. */
     private void launch(Entry e) {
         if (e.kind == Entry.HOME_SETTINGS) {
-            ctx.startActivity(new Intent(ctx, HomeSettingsActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            // Launcher settings goes through Home, which starts it for a result as the Settings pill's menu does.
+            boolean launcherSettings = LauncherSettingsActivity.class.getName().equals(e.component.getClassName());
+            ctx.startActivity(launcherSettings
+                    ? new Intent(MainActivity.ACTION_LAUNCHER_SETTINGS).setClass(ctx, MainActivity.class)
+                    : new Intent(ctx, HomeSettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             return;
         }
         Intent i = new Intent(Intent.ACTION_MAIN)
