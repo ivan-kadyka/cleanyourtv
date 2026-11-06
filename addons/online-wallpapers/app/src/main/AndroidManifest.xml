@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!-- Only to fetch Bing's image-of-the-day list and its pictures from www.bing.com. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:banner="@drawable/banner"
+        android:icon="@drawable/icon"
+        android:label="@string/app_name"
+        android:supportsRtl="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <!-- Status screen: how many pictures, when they were fetched, and a Refresh button. -->
+        <activity
+            android:name=".StatusActivity"
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Clean Your TV launcher, online wallpapers: where Home reads the pictures. -->
+        <meta-data android:name="com.gathin.tvhome.wallpapers" android:value="tv.cleanyour.wallpapers.pictures" />
+
+        <!-- Read-only: the list (name and caption) and the pictures. -->
+        <provider
+            android:name=".PicturesProvider"
+            android:authorities="tv.cleanyour.wallpapers.pictures"
+            android:exported="true" />
+    </application>
+</manifest>
